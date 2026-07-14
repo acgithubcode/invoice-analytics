@@ -51,5 +51,6 @@ def require_roles(*allowed_roles: Role) -> Callable[[User], User]:
 
 
 authenticated_user = get_current_active_user
-only_admin = require_roles(Role.admin)
-manager_or_admin = require_roles(Role.manager, Role.admin)
+only_superadmin = require_roles(Role.superadmin)
+only_admin = require_roles(Role.admin, Role.superadmin)
+manager_or_admin = require_roles(Role.manager, Role.admin, Role.superadmin)

@@ -48,12 +48,15 @@ backend/
 
 ## Roles
 
+- `superadmin`
 - `employee`
 - `manager`
 - `admin`
 
 General access rules:
 
+- Superadmins can create admin users and have admin-level access.
+- Admins can create employee and manager users and share the credentials they set.
 - Employees can create sales/purchase records and view limited reports.
 - Managers can approve invoices and manage operational records.
 - Admins can manage everything and view all reports.
@@ -122,10 +125,37 @@ GET /health
 Authentication:
 
 ```text
+POST /auth/setup-superadmin
 POST /auth/register
 POST /auth/login
 GET  /auth/me
 ```
+
+Create the first superadmin once:
+
+```http
+POST /auth/setup-superadmin
+Content-Type: application/json
+
+{
+  "full_name": "Super Admin",
+  "email": "superadmin@example.com",
+  "mobile": "9999999999",
+  "password": "ChangeMe123"
+}
+```
+
+After this, log in with `/auth/login`. The setup endpoint returns `409` once a superadmin already exists.
+
+User management:
+
+```text
+POST /users
+```
+
+- Superadmin can create `admin`, `manager`, and `employee` users.
+- Admin can create `manager` and `employee` users.
+- Superadmin accounts cannot be created from `/users`.
 
 Clients:
 

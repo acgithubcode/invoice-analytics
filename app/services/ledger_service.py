@@ -211,7 +211,7 @@ def create_bank_statement_ledger_entry(
 
 
 def can_create_manual_entry(current_user: User, payload: LedgerEntryCreate) -> bool:
-    if current_user.role in {Role.manager, Role.admin}:
+    if current_user.role in {Role.manager, Role.admin, Role.superadmin}:
         return True
     if current_user.role == Role.employee:
         return current_user.can_add_manual_ledger_entries and payload.entry_type != LedgerEntryType.adjustment

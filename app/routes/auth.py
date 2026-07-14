@@ -3,10 +3,16 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies.auth import authenticated_user
-from app.models.user import User
+from app.models.user import Role, User
 from app.schemas.auth import LoginRequest, Token
-from app.schemas.user import UserCreate, UserRead
-from app.services.user_service import authenticate_user, create_user, get_user_by_email, get_user_by_mobile
+from app.schemas.user import SuperAdminCreate, UserCreate, UserRead
+from app.services.user_service import (
+    authenticate_user,
+    create_user,
+    get_user_by_email,
+    get_user_by_mobile,
+    get_user_by_role,
+)
 from app.utils.security import create_access_token
 
 router = APIRouter()
@@ -14,11 +20,37 @@ router = APIRouter()
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, db: Session = Depends(get_db)) -> User:
+    if payload.role != Role.employee:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration can only create employee users.",
+        )
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered.")
     if get_user_by_mobile(db, payload.mobile):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Mobile is already registered.")
     return create_user(db, payload)
+
+
+@router.post("/setup-superadmin", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+def setup_superadmin(payload: SuperAdminCreate, db: Session = Depends(get_db)) -> User:
+    if get_user_by_role(db, Role.superadmin):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Superadmin is already configured.")
+    if get_user_by_email(db, payload.email):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered.")
+    if get_user_by_mobile(db, payload.mobile):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Mobile is already registered.")
+
+    superadmin_payload = UserCreate(
+        full_name=payload.full_name,
+        email=payload.email,
+        mobile=payload.mobile,
+        password=payload.password,
+        role=Role.superadmin,
+        is_active=True,
+        can_add_manual_ledger_entries=True,
+    )
+    return create_user(db, superadmin_payload)
 
 
 @router.post("/login", response_model=Token)
