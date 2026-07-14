@@ -1,9 +1,27 @@
+from decimal import Decimal, InvalidOperation
+from io import BytesIO
+from typing import Any
+
+from fastapi import HTTPException, UploadFile, status
+from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.client import Client
+from app.models.client import BalanceType, Client
 from app.models.user import User
-from app.schemas.client import ClientCreate, ClientUpdate
+from app.schemas.client import ClientCreate, ClientImportError, ClientImportResult, ClientUpdate
+
+
+HEADER_ALIASES = {
+    "client_name": {"company name", "client name", "customer name", "name", "party name"},
+    "address_l1": {"address l1", "address 1", "address line 1", "address"},
+    "address_l2": {"address l2", "address 2", "address line 2"},
+    "gstin": {"gstin", "gst no", "gst number", "gstin no", "gstin number"},
+    "mobile": {"mobile", "phone", "phone no", "mobile no", "contact"},
+    "email": {"email", "email id"},
+    "opening_balance": {"opening balance", "opening_balance"},
+    "balance_type": {"balance type", "balance_type", "dr cr", "debit credit"},
+}
 
 
 def _normalize_gstin(gstin: str | None) -> str | None:
@@ -11,6 +29,51 @@ def _normalize_gstin(gstin: str | None) -> str | None:
         return None
     normalized = gstin.strip().upper()
     return normalized or None
+
+
+def _clean_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).replace("\r", " ").split()).strip()
+
+
+def _normalize_header(value: Any) -> str:
+    return _clean_cell(value).lower().replace("_", " ")
+
+
+def _map_headers(headers: list[Any]) -> dict[str, int]:
+    mapped: dict[str, int] = {}
+    normalized_headers = [_normalize_header(header) for header in headers]
+    for field, aliases in HEADER_ALIASES.items():
+        for index, header in enumerate(normalized_headers):
+            if header in aliases:
+                mapped[field] = index
+                break
+    return mapped
+
+
+def _cell(row: tuple[Any, ...], headers: dict[str, int], field: str) -> str:
+    index = headers.get(field)
+    if index is None or index >= len(row):
+        return ""
+    return _clean_cell(row[index])
+
+
+def _parse_decimal(value: str, row_number: int, errors: list[ClientImportError]) -> Decimal:
+    if not value:
+        return Decimal("0.00")
+    try:
+        return Decimal(value.replace(",", ""))
+    except InvalidOperation:
+        errors.append(ClientImportError(row=row_number, message=f"Invalid opening balance: {value}"))
+        return Decimal("0.00")
+
+
+def _parse_balance_type(value: str) -> BalanceType:
+    normalized = value.strip().lower()
+    if normalized in {"credit", "cr", "c"}:
+        return BalanceType.credit
+    return BalanceType.debit
 
 
 def get_client_by_id(db: Session, client_id: int) -> Client | None:
@@ -45,6 +108,109 @@ def create_client(db: Session, payload: ClientCreate, current_user: User) -> Cli
     db.commit()
     db.refresh(client)
     return client
+
+
+async def import_clients_from_excel(db: Session, upload: UploadFile, current_user: User) -> ClientImportResult:
+    filename = (upload.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .xlsx Excel files are supported.",
+        )
+
+    contents = await upload.read()
+    try:
+        workbook = load_workbook(BytesIO(contents), read_only=True, data_only=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not read Excel file.",
+        ) from exc
+
+    sheet = workbook.active
+    rows = sheet.iter_rows(values_only=True)
+    try:
+        headers = _map_headers(list(next(rows)))
+    except StopIteration:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Excel file is empty.") from None
+
+    required_headers = {"client_name", "gstin"}
+    missing_headers = sorted(required_headers - set(headers))
+    if missing_headers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required columns: {', '.join(missing_headers)}.",
+        )
+
+    inserted = 0
+    updated = 0
+    skipped_duplicates = 0
+    skipped_invalid = 0
+    seen_gstins: set[str] = set()
+    errors: list[ClientImportError] = []
+
+    for row_number, row in enumerate(rows, start=2):
+        client_name = _cell(row, headers, "client_name")
+        gstin = _normalize_gstin(_cell(row, headers, "gstin"))
+        if not client_name and not gstin:
+            continue
+        if not client_name:
+            skipped_invalid += 1
+            errors.append(ClientImportError(row=row_number, message="Client name is required."))
+            continue
+        if not gstin or len(gstin) != 15:
+            skipped_invalid += 1
+            errors.append(ClientImportError(row=row_number, message="Valid 15-character GSTIN is required."))
+            continue
+        if gstin in seen_gstins:
+            skipped_duplicates += 1
+            errors.append(ClientImportError(row=row_number, message=f"Duplicate GSTIN in file: {gstin}"))
+            continue
+        seen_gstins.add(gstin)
+
+        address_parts = [_cell(row, headers, "address_l1"), _cell(row, headers, "address_l2")]
+        address = ", ".join(part for part in address_parts if part) or None
+        mobile = _cell(row, headers, "mobile") or None
+        email = _cell(row, headers, "email") or None
+        opening_balance = _parse_decimal(_cell(row, headers, "opening_balance"), row_number, errors)
+        balance_type = _parse_balance_type(_cell(row, headers, "balance_type"))
+
+        existing = get_client_by_gstin(db, gstin)
+        if existing:
+            existing.client_name = client_name
+            existing.billing_name = client_name
+            existing.address = address
+            existing.mobile = mobile
+            existing.email = email
+            existing.opening_balance = opening_balance
+            existing.balance_type = balance_type
+            updated += 1
+            continue
+
+        db.add(
+            Client(
+                client_name=client_name,
+                billing_name=client_name,
+                address=address,
+                gstin=gstin,
+                mobile=mobile,
+                email=email,
+                opening_balance=opening_balance,
+                balance_type=balance_type,
+                current_balance=opening_balance,
+                created_by_user_id=current_user.id,
+            )
+        )
+        inserted += 1
+
+    db.commit()
+    return ClientImportResult(
+        inserted=inserted,
+        updated=updated,
+        skipped_duplicates=skipped_duplicates,
+        skipped_invalid=skipped_invalid,
+        errors=errors[:50],
+    )
 
 
 def list_clients(db: Session, search: str | None = None) -> list[Client]:

@@ -1,16 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies.auth import authenticated_user, manager_or_admin
 from app.models.client import Client
 from app.models.user import User
-from app.schemas.client import ClientCreate, ClientRead, ClientUpdate
+from app.schemas.client import ClientCreate, ClientImportResult, ClientRead, ClientUpdate
 from app.services.client_service import (
     create_client,
     delete_client,
     get_client_by_gstin,
     get_client_by_id,
+    import_clients_from_excel,
     list_clients,
     update_client,
 )
@@ -28,6 +29,15 @@ def create_new_client(
     if existing_client:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="GSTIN is already registered.")
     return create_client(db, payload, current_user)
+
+
+@router.post("/import-excel", response_model=ClientImportResult)
+async def import_excel_clients(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(authenticated_user),
+) -> ClientImportResult:
+    return await import_clients_from_excel(db, file, current_user)
 
 
 @router.get("", response_model=list[ClientRead])

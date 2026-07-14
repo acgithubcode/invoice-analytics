@@ -50,3 +50,16 @@ class ClientRead(BaseModel):
     created_by_user_id: int
     created_at: datetime
     updated_at: datetime
+
+
+class ClientImportError(BaseModel):
+    row: int
+    message: str
+
+
+class ClientImportResult(BaseModel):
+    inserted: int
+    updated: int
+    skipped_duplicates: int
+    skipped_invalid: int
+    errors: list[ClientImportError] = []

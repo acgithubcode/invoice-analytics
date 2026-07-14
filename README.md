@@ -260,6 +260,46 @@ credit,deposit,deposits
 balance,closing_balance
 ```
 
+## Seed Client Master
+
+Import the prepared client master list:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.utils.seed_clients --created-by-email superadmin@test.com
+```
+
+Use an existing admin or superadmin email for `--created-by-email`. The importer updates existing clients by GSTIN, inserts new clients, and skips duplicate GSTIN rows from the seed list because `clients.gstin` is unique.
+
+## Client Excel Import
+
+Upload client masters from the app or API:
+
+```text
+POST /clients/import-excel
+Content-Type: multipart/form-data
+file: .xlsx
+```
+
+Required Excel columns:
+
+```text
+Company Name
+GSTIN
+```
+
+Optional columns:
+
+```text
+Address L1
+Address L2
+Mobile
+Email
+Opening Balance
+Balance Type
+```
+
+The import inserts new GSTINs, updates existing GSTINs, skips duplicate GSTIN rows within the same file, and returns a summary with skipped-row messages.
+
 ## Git Notes
 
 Do not commit local secrets or virtual environments.
