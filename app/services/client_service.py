@@ -1,5 +1,6 @@
+import csv
 from decimal import Decimal, InvalidOperation
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import Any
 
 from fastapi import HTTPException, UploadFile, status
@@ -13,7 +14,7 @@ from app.schemas.client import ClientCreate, ClientImportError, ClientImportResu
 
 
 HEADER_ALIASES = {
-    "client_name": {"company name", "client name", "customer name", "name", "party name"},
+    "client_name": {"company", "company name", "client name", "customer name", "name", "party name"},
     "address_l1": {"address l1", "address 1", "address line 1", "address"},
     "address_l2": {"address l2", "address 2", "address line 2"},
     "gstin": {"gstin", "gst no", "gst number", "gstin no", "gstin number"},
@@ -50,6 +51,41 @@ def _map_headers(headers: list[Any]) -> dict[str, int]:
                 mapped[field] = index
                 break
     return mapped
+
+
+def _normalize_row(row: tuple[Any, ...] | list[Any]) -> tuple[Any, ...]:
+    values = tuple(row)
+    non_empty = [_clean_cell(value) for value in values if _clean_cell(value)]
+    if len(non_empty) == 1:
+        value = non_empty[0]
+        if "\t" in value:
+            return tuple(value.split("\t"))
+        if "," in value:
+            return tuple(next(csv.reader([value])))
+    return values
+
+
+def _select_header_row(
+    first_row: list[Any],
+    rows: list[tuple[Any, ...]],
+) -> tuple[dict[str, int], list[tuple[Any, ...]], int]:
+    all_rows = [_normalize_row(first_row), *[_normalize_row(row) for row in rows]]
+    required_headers = {"client_name", "gstin"}
+
+    for index, row in enumerate(all_rows[:10]):
+        headers = _map_headers(list(row))
+        if required_headers.issubset(headers):
+            return headers, all_rows[index + 1 :], index + 2
+
+    best_headers = _map_headers(list(all_rows[0])) if all_rows else {}
+    missing_headers = sorted(required_headers - set(best_headers))
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"Missing required columns: {', '.join(missing_headers)}. "
+            "Expected columns like Company Name and GSTIN."
+        ),
+    )
 
 
 def _cell(row: tuple[Any, ...], headers: dict[str, int], field: str) -> str:
@@ -110,15 +146,27 @@ def create_client(db: Session, payload: ClientCreate, current_user: User) -> Cli
     return client
 
 
-async def import_clients_from_excel(db: Session, upload: UploadFile, current_user: User) -> ClientImportResult:
-    filename = (upload.filename or "").lower()
-    if not filename.endswith(".xlsx"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only .xlsx Excel files are supported.",
-        )
+def _read_csv_rows(contents: bytes) -> tuple[list[Any], list[tuple[Any, ...]]]:
+    try:
+        text = contents.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = contents.decode("latin-1")
 
-    contents = await upload.read()
+    sample = text[:2048]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.reader(StringIO(text), dialect)
+    try:
+        headers = next(reader)
+    except StopIteration:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is empty.") from None
+    return headers, [tuple(row) for row in reader]
+
+
+def _read_xlsx_rows(contents: bytes) -> tuple[list[Any], list[tuple[Any, ...]]]:
     try:
         workbook = load_workbook(BytesIO(contents), read_only=True, data_only=True)
     except Exception as exc:
@@ -130,17 +178,23 @@ async def import_clients_from_excel(db: Session, upload: UploadFile, current_use
     sheet = workbook.active
     rows = sheet.iter_rows(values_only=True)
     try:
-        headers = _map_headers(list(next(rows)))
+        headers = list(next(rows))
     except StopIteration:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Excel file is empty.") from None
+    return headers, list(rows)
 
-    required_headers = {"client_name", "gstin"}
-    missing_headers = sorted(required_headers - set(headers))
-    if missing_headers:
+
+async def import_clients_from_excel(db: Session, upload: UploadFile, current_user: User) -> ClientImportResult:
+    filename = (upload.filename or "").lower()
+    if not filename.endswith((".xlsx", ".csv")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing required columns: {', '.join(missing_headers)}.",
+            detail="Only .xlsx Excel or .csv files are supported.",
         )
+
+    contents = await upload.read()
+    raw_headers, rows = _read_csv_rows(contents) if filename.endswith(".csv") else _read_xlsx_rows(contents)
+    headers, data_rows, first_data_row_number = _select_header_row(raw_headers, rows)
 
     inserted = 0
     updated = 0
@@ -149,7 +203,7 @@ async def import_clients_from_excel(db: Session, upload: UploadFile, current_use
     seen_gstins: set[str] = set()
     errors: list[ClientImportError] = []
 
-    for row_number, row in enumerate(rows, start=2):
+    for row_number, row in enumerate(data_rows, start=first_data_row_number):
         client_name = _cell(row, headers, "client_name")
         gstin = _normalize_gstin(_cell(row, headers, "gstin"))
         if not client_name and not gstin:

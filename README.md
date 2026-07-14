@@ -270,7 +270,7 @@ Import the prepared client master list:
 
 Use an existing admin or superadmin email for `--created-by-email`. The importer updates existing clients by GSTIN, inserts new clients, and skips duplicate GSTIN rows from the seed list because `clients.gstin` is unique.
 
-## Client Excel Import
+## Client Excel/CSV Import
 
 Upload client masters from the app or API:
 
@@ -278,6 +278,12 @@ Upload client masters from the app or API:
 POST /clients/import-excel
 Content-Type: multipart/form-data
 file: .xlsx
+```
+
+CSV files are also supported:
+
+```text
+file: .csv
 ```
 
 Required Excel columns:
